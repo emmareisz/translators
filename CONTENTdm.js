@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2021-06-24 17:09:17"
+	"lastUpdated": "2021-07-06 17:51:22"
 }
 
 /**
@@ -238,7 +238,7 @@ function scrapeToItem(data, item) {
 	}
 	
 	item.itemType = data.detectType();
-	item.title = join(queryByName(/title/i), query('title'));
+	item.title = join(queryByName(/title/i), query('title')).replace(' : ', ': ');
 	
 	// CDM pages have zero sign of what library catalog they're displaying,
 	// besides an alt-text-less logo image at the top. so we can't really fill
@@ -248,7 +248,8 @@ function scrapeToItem(data, item) {
 	item.creators = [
 		...cleanCreators(queryByName(/creator|author/i), 'author'),
 		...cleanCreators(queryByName(/translator/i), 'translator'),
-		...cleanCreators(queryByName(/editor/i), 'editor'),
+		...cleanCreators(queryByName(/series editor/i), 'seriesEditor'),
+		...cleanCreators(queryByName(/^\s*editor/i), 'editor'),
 		...cleanCreators(queryByName(/contributor/i), 'contributor'),
 		...cleanCreators(queryByName(/interviewer/i), 'interviewer')
 	];
@@ -333,6 +334,11 @@ function attachPDF(doc, item) {
 				break;
 			}
 		}
+	}
+	
+	if (!pdfLink && text(doc, '.field-format .field-value').includes('application/pdf')
+		&& doc.querySelector('a[aria-label="Download"]')) {
+		pdfLink = attr(doc, 'a[aria-label="Download"]', 'href');
 	}
 	
 	if (pdfLink) {
@@ -657,6 +663,56 @@ var testCases = [
 					}
 				],
 				"tags": [],
+				"notes": [],
+				"seeAlso": []
+			}
+		]
+	},
+	{
+		"type": "web",
+		"url": "https://content.scu.edu/digital/collection/rms/id/60",
+		"defer": true,
+		"items": [
+			{
+				"itemType": "document",
+				"title": "Curing our tunnel vision: the representation of the Ohlone in Bay Area museums",
+				"creators": [
+					{
+						"firstName": "Amy C.",
+						"lastName": "Raimundo",
+						"creatorType": "author"
+					},
+					{
+						"firstName": "Russell K.",
+						"lastName": "Skowronek",
+						"creatorType": "seriesEditor"
+					}
+				],
+				"date": "1995",
+				"archive": "Anthropology Research Manuscripts",
+				"language": "English",
+				"publisher": "Santa Clara University, Department of Anthropology and Sociology",
+				"rights": "Permission to copy or publish any portion of SCU Archives materials must be given by Santa Clara University Library, Archives & Special Collections.",
+				"shortTitle": "Curing our tunnel vision",
+				"url": "https://content.scu.edu/digital/collection/rms/id/60",
+				"attachments": [
+					{
+						"title": "Snapshot",
+						"mimeType": "text/html"
+					},
+					{
+						"title": "Full Text PDF",
+						"mimeType": "application/pdf"
+					}
+				],
+				"tags": [
+					{
+						"tag": "Costanoan Indians"
+					},
+					{
+						"tag": "Museums--California--San Francisco Bay Area"
+					}
+				],
 				"notes": [],
 				"seeAlso": []
 			}
