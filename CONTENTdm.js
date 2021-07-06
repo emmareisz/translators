@@ -1,21 +1,21 @@
 {
 	"translatorID": "f715a5a1-c362-47cf-b736-2cb2c882b852",
 	"label": "CONTENTdm",
-	"creator": "Emma Reisz",
-	"target": "/cdm/|/cdm4/",
-	"minVersion": "3.0.9",
+	"creator": "Emma Reisz and Abe Jellinek",
+	"target": "/digital/collection/[^/]+/id|/cdm/",
+	"minVersion": "3.0",
 	"maxVersion": "",
-	"priority": 100,
+	"priority": 270,
 	"inRepository": true,
 	"translatorType": 4,
-	"browserSupport": "gcsbv",
-	"lastUpdated": "2015-11-02 10:55:08"
+	"browserSupport": "gcsibv",
+	"lastUpdated": "2021-07-06 17:51:22"
 }
 
 /**
 	***** BEGIN LICENSE BLOCK *****
 
-	CONTENTdm translator; Copyright © 2015 Emma Reisz
+	CONTENTdm translator; Copyright © 2015-2021 Emma Reisz and Abe Jellinek
 	This file is part of Zotero.
 
 	Zotero is free software: you can redistribute it and/or modify
@@ -38,415 +38,341 @@
   ContentDM is an OCLC product used by several hundred libraries, archives and museums.
   CDM may be hosted by OCLC or by the customer.
   CDM includes an API which calls metadata as XML or JSON, but customers may disable it.
-  By preference, this translator scrapes XML from an API query (slow)
-  and from a webpage as a fallback (quick but vulnerable to a redesign).
-  XML is preferred to JSON because it allows code to be shared with the webscraper.
-  The translator will also scrape some data from legacy CDM webpages (version < 6).
-  Older CDM versions had no standardised field names so comprehensive scraping is unrealistic.
+  By preference, this translator scrapes JSON from an API query (slow!).
+  Even in recent CDM installs, creative uses for theoretically standardized
+  field names are so common that we need a data source that includes display
+  names. JSON does, XML doesn't.
 */
 
-function detectWeb( doc, url ) {
-  if ( !url.match( "/cdm/" ) && !url.match( "/cdm4/" ) ) return;
-  if ( url.match( "/cdm/search/" ) ) return "multiple";
-  else if ( url.match( "/cdm/landingpage" ) || !url.substring( url.indexOf( '/cdm/' ) + 5 ) ) return "webpage";
-  else if ( url.match( "/cdm/fullbrowser" ) ) { // Pages without item metadata
-	originatingItem = ZU.xpath( doc, '//link[@rel="canonical"]' );
-	if ( originatingItem && originatingItem[ 0 ].href ) return "document"; // Slow to scrape again for item type
-	else return "";
-  }
-  return ( function() {
-	var itemType = fetchXPathText( doc, '//*[@id="metadata_type"]' );
-	if ( !itemType ) itemType = fetchXPathText( doc, '//*[@id="metadata_object_type"]' );
-	switch ( itemType ) {
-	  case "Image":
-	  case "Photograph":
-	  case "Engraved portrait":
-	  case "Negative":
-		return 'artwork';
-	  case "Text":
-		return 'manuscript';
-	  default:
-		return 'document';
+class CDMData {
+	constructor(model) {
+		let fieldsByKey = {};
+
+		if (model.parent) {
+			this.parent = new CDMData(model.parent);
+		}
+		
+		for (let field of model.fields) {
+			fieldsByKey[field.key] = field;
+		}
+
+		this.fieldsByKey = fieldsByKey;
+		this.collectionName = model.collectionName;
 	}
-  }() );
-}
-
-function fetchXPathText( doc, xpath ) { // Removes excess whitespace & breaks, respaces items overtrimmed by trimInternal.
-  if ( ZU.xpathText( doc, xpath ) ) {
-	return ZU.trimInternal( ZU.xpathText( doc, xpath ).replace( /^\s+|\s+$|\;$|\,$/g, '' ).replace( /([a-z])([A-Z])/g, '$1\. $2' ) );
-  } else return;
-}
-
-function fetchXPathValue( doc, xpath ) {
-  if ( ZU.xpath( doc, xpath )[ 0 ] ) return ZU.xpath( doc, xpath )[ 0 ].value;
-  else return;
-}
-
-function fetchXmlUrl( doc, url ) { // Fetches xml urls if using OCLC server (as constructor)
-  var serverID = new RegExp( "/collection\/p([A-Z0-9]+)coll", "i" );
-  var serverID2 = new RegExp( "//cdm([0-9]+).contentdm.oclc.org" );
-  var collectionID = new RegExp( "/collection\/([A-Z0-9]+)\/", "i" );
-  var objectID = new RegExp( "/id\/([A-Z0-9]+)", "i" );
-  var itemID = new RegExp( "/show\/([A-Z0-9]+)", "i" );
-  var objectUrlHttp = fetchXPathValue( doc, '//input[@id="cdm_objectRefUrl"]' );
-  var itemUrlHttp = fetchXPathValue( doc, '//input[@id="cdm_newRefUrl"]' );
-  var server;
-  var xmlQueryUrl;
-  if ( objectUrlHttp ) url = objectUrlHttp; // Use object page as primary even if item page is present
-  else if ( itemUrlHttp ) {
-	url = itemUrlHttp;
-	itemUrlHttp = "";
-  } // Use item page as primary if no object page is present
-  if ( url.match( serverID ) ) server = url.match( serverID )[ 1 ];
-  else if ( url.match( serverID2 ) ) server = url.match( serverID2 )[ 1 ];
-  if ( server && url.match( collectionID ) && url.match( objectID ) ) {
-	xmlQueryUrl = "https://server" + server + ".contentdm.oclc.org/dmwebservices/index.php?q=dmGetItemInfo/" + url.match( collectionID )[ 1 ] + "/";
-	this.object = xmlQueryUrl + url.match( objectID )[ 1 ] + "/show/xml";
-  } else this.object = "";
-  if ( itemUrlHttp ) this.item = xmlQueryUrl + itemUrlHttp.match( objectID )[ 1 ] + "/show/xml";
-  else if ( this.object && url.match( itemID ) ) this.item = xmlQueryUrl + url.match( itemID )[ 1 ] + "/show/xml";
-  else this.item = "";
-}
-
-function scrape( doc, url ) {
-  var item = new Zotero.Item( detectWeb( doc, url ) );
-  url = doc.documentURI;
-  var xmlUrl = new fetchXmlUrl( doc, url );
-
-  /* Mappings for XML and Web (CDM>5)
-   * The scraper only scrapes fields specified in the mapping table.
-   * Enter mappings as [zoteroField, CDMfield];
-   * note CDM allows customers to configure fields
-   * so these are inconsistently implemented.
-   */
-  var mapping = [
-			[ 'title', 'title' ],
-			[ 'creator', 'creato' ],
-			[ 'creator2', 'creata' ],
-			[ 'contributor', 'contri' ],
-			[ 'abstractNote', 'descri' ],
-			[ 'language', 'langua' ],
-			[ 'language2', 'languag' ],
-			[ 'archiveLocation', 'identi' ], // On CDM this is 'Identifier'
-			[ 'archiveLocation2', 'locala' ],
-			[ 'archive', 'source' ],
-			[ 'collection', 'collec' ],
-			[ 'collection2', 'relati' ],
-			[ 'publisher', 'publis' ], // Omitted by manuscript item type
-			[ 'rights', 'rights' ],
-			[ 'subject', 'subject' ], // Scraped into tags
-			[ 'subject2', 'subjea' ],
-			[ 'subject3', 'subjeb' ],
-			[ 'subject4', 'subjec' ],
-			[ 'person', 'person' ],
-			[ 'medium', 'type' ],
-			[ 'format', 'format' ],
-			[ 'date', 'date' ],
-			[ 'date2', 'dated' ],
-			[ 'place', 'covera' ],
-			[ 'place2', 'coverab' ],
-			[ 'period', 'period' ],
-		  ];
-
-  /* Mappings for Web (CDM<6)
-   * CDM < 6 does not provide standard field names.
-   * The scraper scrapes the whole display table,
-   * and converts displayed fieldnames to camelCase
-   * to maximise the chance of a Zotero match.
-   * Hardcode additional matches here as [zoteroField, displayedField];
-   */
-
-  var legacyMapping = [ // Enter mappings as [zoteroField,camelizedCDMField]
-			[ "place", "town" ],
-			[ "abstractNote", "description" ],
-			[ "subject2", "keywords" ],
-			[ "subject3", "subjectKeywords" ],
-			[ "date2", "workDate" ],
-			[ "creator", "bookCreator" ],
-			[ "rights", "rights--UsageStatement" ],
-			[ "contributor2", "photographer" ],
-			[ "title2", "bookTitle" ],
-		  ];
-
-  var docTitle = ( function() {
-	if ( doc.title == "ContentDM" ) return url.substring( url.indexOf( '://' ) + 3, url.indexOf( '/cdm/' ) ).replace( /^\s+|\s+$/g, '' );
-	else return doc.title.replace( /^\s+|\s+$/g, '' );
-  }() );
-
-  item.libraryCatalog = ( function() {
-	var catalog = fetchXPathText( doc, '//*[@id="breadcrumb_top_content"]/a[2]' );
-	if ( catalog ) return catalog;
-	else if ( docTitle.match( '::' ) ) return docTitle.substring( doc.title.indexOf( '::' ) + 3 ); // Fallback: use second part of webpage title
-	else return docTitle;
-  }() );
-
-  item.websiteType = "ContentDM";
-  item.attachments.push( {
-	title: "Snapshot of CONTENTdm record",
-	mimeType: "text/html",
-	document: doc
-  } );
-  item.url = url;
-  //  item.attachments.push({url:url, title: "Link to Record", mimeType: "text/html", snapshot: false}); // optional; url set instead
-  attachPDF( doc, item );
-
-  ZU.doGet( xmlUrl.object, function( text ) {
-	// Z.debug(text);                                           // View primary XML doc
-	var scrapeMode;
-	if ( !xmlUrl.object || !text || text.match( "The web server is not configured" ) ) scrapeMode = "Web";
-	else { // Scrape from API XML
-	  var docxml = ( new DOMParser() ).parseFromString( text, "text/xml" );
-	  if ( xmlUrl.item ) { // Scraping from two XML docs
-		ZU.doGet( xmlUrl.item, function( text ) {
-		  var doc2xml = ( new DOMParser() ).parseFromString( text, "text/xml" );
-		  // Z.debug(text);                                   // View secondary XML doc
-		  scrapeToItem( docxml, item, url, docTitle, mapping, "xml", doc2xml );
-		  item.complete();
-		} );
-	  } else { // Scraping from a single XML doc
-		scrapeToItem( docxml, item, url, docTitle, mapping, "xml" );
-		item.complete();
-	  }
-	  return; // Return from the ZU.doGet callback after XML scrape
+	
+	static fromModel(model) {
+		return new this(model);
 	}
-	if ( scrapeMode == "Web" ) {
-	  var headerXPath;
-	  var contentXPath;
-	  var offset;
-	  var xhttp = new XMLHttpRequest();
-	  xhttp.open( "GET", url, false );
-	  xhttp.send();
-	  fullSource = xhttp.responseText;
-
-	  if ( doc.documentElement.innerHTML.match( "CONTENTdm Version" ) ) { // Web scrape for CDM version 6+;
-		scrapeToItem( doc, item, url, docTitle, mapping, "web" );
-	  }
-
-	  else if ( fullSource.match( "CONTENTdm Version 5" ) ) { // Web scrape for CDM Version 5
-		headerXPath = '//table/tbody/tr/td/table/tbody/tr/td/table[2]/tbody/tr[2]/td/table/tbody/tr[2]/td/table/tbody/tr/td[1]';
-		contentXPath = '//table/tbody/tr/td/table/tbody/tr/td/table[2]/tbody/tr[2]/td/table/tbody/tr[2]/td/table/tbody/tr/td[2]';
-		offset = 1;
-		legacyScrapeToItem( doc, item, headerXPath, contentXPath, offset, legacyMapping, docTitle, url );
-	  }
-
-	  else if ( fullSource.match( "CONTENTdm" ) ) { // Web scrape for CDM Version 4 or below
-		headerXPath = '//div/div[3]/table[2]/tbody/tr/td[1]';
-		contentXPath = '//div/div[3]/table[2]/tbody/tr/td[2]';
-		offset = 0;
-		legacyScrapeToItem( doc, item, headerXPath, contentXPath, offset, legacyMapping, docTitle, url );
-	  }
-
-	  item.complete();
-
-	  return; // Return from the ZU.doGet callback after Web scrape
+	
+	static fromDoc(doc) {
+		let fields = [];
+		for (let tr of doc.querySelectorAll('#details table tr')) {
+			let field = {};
+			for (let td of tr.querySelectorAll('td')) {
+				if (td.matches('.description_col1')) {
+					field.key = td.id.replace(/^metadata_nickname_/, '');
+					field.label = ZU.trimInternal(td.innerText);
+				}
+				else if (td.matches('.description_col2')) {
+					field.value = ZU.trimInternal(td.innerText);
+				}
+			}
+			fields.push(field);
+		}
+		
+		let collectionName = text('#breadcrumb_top .action_link_10', 1);
+		
+		return new this({ fields, collectionName });
 	}
-  } );
-  return '';
-}
-
-function legacyScrapeToItem( doc, item, headerXPath, contentXPath, offset, mapping, docTitle, url ) {
-  var headers = ZU.xpath( doc, headerXPath ); // Scrapes the whole metadata table and looks for matches after.
-  var contents = ZU.xpath( doc, contentXPath );
-  for ( i = 0; i < contents.length; i++ ) {
-	var header;
-	var content;
-	j = i + offset;
-	if ( headers[ j ].textContent ) {
-	  header = headers[ j ].textContent;
-	  header = camelize( header );
+	
+	query(key) {
+		if (this.parent) {
+			let parentResult = this.parent.query(key);
+			if (parentResult) return parentResult;
+		}
+		return ((this.fieldsByKey[key] || {}).value || '')
+			.trim()
+			.replace(/;$/, '');
 	}
-	if ( contents[ i ].textContent ) content = contents[ i ].textContent;
-	item[ header ] = content;
-  }
-  for ( var i in mapping ) item[ mapping[ i ][ 0 ] ] = item[ mapping[ i ][ 1 ] ];
-  tidyItem( item );
-  if ( !item.title ) item.title = getTitle( doc, docTitle, url );
-
-  function camelize( str ) {
-	return str.replace( /(?:^\w|[A-Z]|\b\w)/g, function( letter, index ) {
-	  return index === 0 ? letter.toLowerCase() : letter.toUpperCase();
-	} ).replace( /\s+/g, '' );
-  }
-}
-
-function scrapeToItem( doc, item, url, docTitle, mapping, prefixes, doc2 ) {
-  var info = []; // Scrapes only fields named in the mapping array.
-  var xpath;
-  var itemText;
-  for ( var i in mapping ) {
-	var thisField = [];
-	var field = mapping[ i ][ 1 ];
-	if ( prefixes == "web" ) xpath = {
-	  object: "//*[@id='metadata_object_" + field + "']",
-	  item: "//*[@id='metadata_" + field + "']"
-	};
-	else if ( prefixes == "xml" ) xpath = {
-	  object: "//" + field,
-	  item: ""
-	};
-	thisField = [ mapping[ i ][ 0 ], xpath.object, xpath.item ];
-	info.push( thisField );
-  }
-  for ( var j in info ) {
-	var text = fetchXPathText( doc, info[ j ][ 1 ] );
-	if ( !doc2 ) { // Scrape from single document
-	  if ( info[ j ][ 0 ] == "title" && !text ) text = getTitle( doc, docTitle, url );
-	  if ( info[ j ][ 2 ] ) itemText = fetchXPathText( doc, info[ j ][ 2 ] );
-	} else { // Scrape from two documents
-	  itemText = fetchXPathText( doc2, info[ j ][ 1 ] );
-	  if ( info[ j ][ 0 ] == "title" && !itemText ) itemText = getTitle( doc2, docTitle, url );
+	
+	queryByName(re) {
+		if (this.parent) {
+			let parentResult = this.parent.queryByName(re);
+			if (parentResult) return parentResult;
+		}
+		for (let field of Object.values(this.fieldsByKey)) {
+			if (re.test(field.label)) {
+				return this.query(field.key);
+			}
+		}
+		return '';
 	}
-	if ( text != itemText ) text = [ itemText, text ].filter( function( val ) {
-	  return val;
-	} ).join( '. ' );
-	item[ info[ j ][ 0 ] ] = text;
-  }
-  tidyItem( item );
-  return item;
-}
-
-function tidyItem( item ) {
-  mergeFields( item );
-  replaceFields( item );
-  cleanAuthor( item );
-  item.tags = []; //Tags must be in an array
-  item.tags = item.subject.replace( /\([^)]*\)/g, '' ).split( /[.;]/ );
-  for ( var k in item.tags ) item.tags[ k ] = ZU.trimInternal( item.tags[ k ].replace( /^\s+|\s+$/g, '' ).replace( /\s+\,/g, ',' ) );
-  return item;
-}
-
-function mergeFields( item ) {
-  var merges = [
-		  [ 'subject', 'subject2', 'subject3', 'subject4', 'person' ], // List all the sets of fields to be combined, Zotero field first
-		  [ 'archive', 'collection', 'collection2' ],
-		  [ 'place', 'place2' ],
-		  [ 'creator', 'creator2' ],
-		  [ 'archiveLocation', 'archiveLocation2' ],
-		  [ 'medium', 'format' ],
-		  [ 'contributor', 'contributor2' ],
-		];
-  for ( var i in merges ) {
-	var mergeArray = [];
-	for ( var j in merges[ i ] ) {
-	  mergeArray.push( item[ merges[ i ][ j ] ] ); // Arrays are easier to filter
-	  if ( j > 0 ) item[ merges[ i ][ j ] ] = "";
+	
+	detectType() {
+		let title = join(this.queryByName(/title/i, true), this.query('title', true));
+		if (/\binterview\b/i.test(title)) {
+			return 'interview';
+		}
+		
+		let dataType = this.query('typea') || this.query('type');
+		switch (dataType.toLowerCase()) {
+			case "image":
+			case "photograph":
+			case "engraved portrait":
+			case "negative":
+				return 'artwork';
+			case "interview":
+				return 'interview';
+			default:
+				return 'document';
+		}
 	}
-	item[ merges[ i ][ 0 ] ] = mergeArray.filter( function( val ) {
-	  return val;
-	} ).join( '; ' );
-  }
 }
 
-function replaceFields( item ) {
-  var replace = [
-		  [ 'date', 'date2', 'period' ], // List all the sets of fields to be checked in order of preference, Zotero field first
-		  [ 'language', 'language2' ],
-		  [ 'title', 'title2' ],
-		];
-  for ( var i in replace ) {
-	for ( var j in replace[ i ] ) {
-	  if ( item[ replace[ i ][ 0 ] ] ) break;
-	  else {
-		item[ replace[ i ][ 0 ] ] = item[ replace[ i ][ j ] ];
-		if ( j > 0 ) item[ replace[ i ][ j ] ] = "";
-	  }
+function detectWeb(doc, url) {
+	if (url.includes("/search/") && getSearchResults(doc, true)) {
+		return "multiple";
 	}
-  }
-}
-
-function getTitle( doc, docTitle, url ) {
-  var title;
-  if ( docTitle.match( "::" ) ) docTitle = docTitle.substring( 0, docTitle.indexOf( "::" ) );
-  if ( url.match( "/cdm/landingpage" ) ) title = docTitle + ": About this collection";
-  else title = docTitle; // Fallback: first part of webpage title
-  return title.replace( /^\s+|\s+$/g, '' );
-}
-
-function cleanAuthor( item ) {
-  var authorType = [ "creator", "contributor" ]; // Author field names in the mapping table must be Zotero author types
-  for ( var i in authorType ) {
-	if ( item[ authorType[ i ] ] ) {
-	  fetchedAuthor = item[ authorType[ i ] ].replace( /\([^)]*\)|\[[^\]]*\]|\;$/g, '' ).replace( /, Sir |, Dr /g, ', ' ); // Fetch and remove parentheses and honorifics
-	  var nameArray = [];
-	  item[ authorType[ i ] ] = "";
-	  nameArray = fetchedAuthor.split( ";" ); // Split authors at semicolon and push into an array
-	  for ( var j in nameArray ) item.creators.push( ZU.cleanAuthor( nameArray[ j ], authorType[ i ], 1 ) );
+	else if (url.includes('/collection/')) {
+		if (url.includes('/cdm/') && doc.querySelector('#details table')) {
+			// older collections
+			return CDMData.fromDoc(doc).detectType();
+		}
+		
+		for (let scriptTag of doc.querySelectorAll('script:not([src])')) {
+			let code = scriptTag.innerText.trim();
+			if (!code.startsWith('window.__INITIAL_STATE__')) continue;
+			
+			// a nasty, nasty hack to avoid calling eval.
+			// we have a string that looks like
+			//     JSON.parse('{"foo": "bar \'baz\'"}')
+			// and we need to strip the JSON.parse, replace some weird escapes,
+			// and parse it once as a JSON string literal, another time as
+			// actual JSON. really stupid but it works.
+			
+			try {
+				let string = code.match(/JSON\.parse\(['"](.+)['"]\);/)[1]
+					.replace(/\\x/g, '\\u00')
+					.replace(/\\'/g, "'");
+				string = JSON.parse('"' + string + '"');
+				
+				let data = CDMData.fromModel(JSON.parse(string).item.item);
+				return data.detectType();
+			}
+			catch (e) {
+				Z.debug('Error when detecting type: ' + e);
+				// it's ok, detecting the correct type for the toolbar is not
+				// really that important
+				return 'document';
+			}
+		}
 	}
-  }
-  for ( var k in item.creators ) {
-	if ( !item.creators[ k ].firstName ) item.creators[ k ].fieldMode = 1;
-  }
+	return false;
 }
 
-function attachPDF( doc, item ) {
-  var pdfPath = '//embed';
-  var pdfScrape = ZU.xpath( doc, pdfPath );
-  var pdfObject = pdfScrape[ 0 ]; // Could iterate looking for multiple attachments
-  var pdfTitle;
-  if ( pdfObject && pdfObject.src ) { // Can't simply test for .src
-	var itemTitle = fetchXPathText( doc, '//*[@id="metadata_title"]' );
-	if ( itemTitle ) pdfTitle = "Attachment: " + itemTitle;
-	else pdfTitle = "Attachment";
-	item.attachments.push( {
-	  url: pdfObject.src,
-	  title: pdfTitle,
-	  mimeType: "application/pdf"
-	} );
-  }
-}
-
-function doWeb( doc, url ) {
-  if ( detectWeb( doc, url ) == "multiple" ) { // If on a multiple result page, call Zotero.selectItems
-	var titlePath = '//div/ul/li/ul/li[2]/div/a';
+function getSearchResults(doc, checkOnly) {
 	var items = {};
-	var articles = [];
-	var titles = ZU.xpath( doc, titlePath );
-	if ( titles.length < 1 ) return false; // Null search results will be ignored
-	for ( var i in titles ) {
-	  items[ titles[ i ].href ] = ZU.trimInternal( titles[ i ].textContent );
+	var found = false;
+	var rows = doc.querySelectorAll('a.SearchResult-container');
+	if (!rows.length) rows = doc.querySelectorAll('.listContentBottom a');
+	for (let row of rows) {
+		let href = row.href;
+		let title = ZU.trimInternal(
+			text(row, '.MetadataFields-header') || row.innerText);
+		if (!href || !title) continue;
+		if (checkOnly) return true;
+		found = true;
+		items[href] = title;
 	}
-	Zotero.selectItems( items, function( items ) {
-	  if ( !items ) return true;
-	  for ( var i in items ) {
-		articles.push( i );
-	  }
-	  ZU.processDocuments( articles, scrape );
-	} );
-
-  } else if ( url.match( "/cdm/fullbrowser" ) ) {
-	var originatingItem = ZU.xpath( doc, '//link[@rel="canonical"]' ); // Look for link to originating item
-	if ( originatingItem[ 0 ] && originatingItem[ 0 ].href ) {
-	  url = originatingItem[ 0 ].href;
-	  ZU.processDocuments( url, scrape );
-	} else return false;
-
-  } else if ( ZU.xpath( doc, '//input[@id="cdm_newRefUrl"]' ) ) {
-	var realItem = ZU.xpath( doc, '//input[@id="cdm_newRefUrl"]' ); // CDM pages can display info for other items; look for real url of item
-	if ( realItem[ 0 ] && realItem[ 0 ].value ) {
-	  url = realItem[ 0 ].value;
-	  ZU.processDocuments( url, scrape );
-	} else scrape( doc, url );
-
-  } else {
-	scrape( doc, url );
-  }
+	return found ? items : false;
 }
 
+function doWeb(doc, url) {
+	if (detectWeb(doc, url) == "multiple") {
+		Zotero.selectItems(getSearchResults(doc, false), function (items) {
+			if (items) ZU.processDocuments(Object.keys(items), scrape);
+		});
+	}
+	else {
+		scrape(doc, url);
+	}
+}
+
+function scrape(doc, url) {
+	var item = new Zotero.Item();
+	
+	item.url = url;
+	item.attachments.push({
+		title: "Snapshot",
+		document: doc
+	});
+	attachPDF(doc, item);
+	
+	if (url.includes('/digital/collection/')) {
+		// recent (React-based) collections
+		
+		let jsonURL = url.replace(
+			/\/digital\/collection\/([^/]+)\/id\/([^/]+).*$/,
+			'/digital/api/collections/$1/items/$2/false'
+		);
+		
+		ZU.doGet(jsonURL, function (respText) {
+			let json = JSON.parse(respText);
+			scrapeToItem(CDMData.fromModel(json), item);
+			item.complete();
+		});
+	}
+	else {
+		// older collections
+		scrapeToItem(CDMData.fromDoc(doc), item);
+		item.complete();
+	}
+}
+
+function scrapeToItem(data, item) {
+	function query(key) {
+		return data.query(key);
+	}
+	function queryByName(re) {
+		return data.queryByName(re);
+	}
+	
+	item.itemType = data.detectType();
+	item.title = join(queryByName(/title/i), query('title')).replace(' : ', ': ');
+	
+	// CDM pages have zero sign of what library catalog they're displaying,
+	// besides an alt-text-less logo image at the top. so we can't really fill
+	// in libraryCatalog accurately here
+	item.libraryCatalog = '';
+	
+	item.creators = [
+		...cleanCreators(queryByName(/creator|author/i), 'author'),
+		...cleanCreators(queryByName(/translator/i), 'translator'),
+		...cleanCreators(queryByName(/series editor/i), 'seriesEditor'),
+		...cleanCreators(queryByName(/^\s*editor/i), 'editor'),
+		...cleanCreators(queryByName(/contributor/i), 'contributor'),
+		...cleanCreators(queryByName(/interviewer/i), 'interviewer')
+	];
+	item.abstractNote = query('descri');
+	item.language = queryByName(/language/i);
+	item.archiveLocation = queryByName(/identifier/i)
+		|| join(query('identi'), query('locala'));
+	item.archive = data.collectionName;
+	item.publisher = queryByName(/publisher/i);
+	item.rights = queryByName(/rights/i);
+	if (item.itemType == 'artwork') {
+		item.artworkMedium = queryByName(/type/i);
+	}
+	item.date = ZU.strToISO(query('date') || query('dated') || query('period'));
+	item.place = queryByName(/place/i);
+	
+	let rawTags = queryByName(/keywords|subjects/i);
+	if (rawTags) {
+		rawTags = rawTags.split(';');
+	}
+	else {
+		rawTags = [
+			query('subject'),
+			query('subjea'),
+			query('subjeb'),
+			query('subjec')
+		];
+	}
+	
+	item.tags = rawTags
+		.filter(x => !!x) // non-null/empty only
+		.map(tag => tag.replace(/\([^)]*\)/g, ''))
+		.join(';') // join all semicolon-separated tag lists together...
+		.split(/[.;]/) // ...and then split again (like flatMap but worse)
+		.map(tag => ({ tag: tag.trim() }));
+	
+	return item;
+}
+
+function cleanCreators(raw, creatorType) {
+	function cleanSingle(name) {
+		name = name
+			.replace(/\([^)]*\)|\[[^\]]*\]|;$/g, '')
+			.replace(/, Sir |, Dr /g, ', ');
+			
+		// if we can find a good heuristic for institutional creators, we should
+		// use it here
+		
+		let creator = ZU.cleanAuthor(name, creatorType, true);
+		if (!creator.firstName) {
+			creator.fieldMode = 1;
+			delete creator.firstName;
+		}
+		return creator;
+	}
+	
+	return raw
+		.split(';')
+		.map(cleanSingle);
+}
+
+function attachPDF(doc, item) {
+	var pdfObject = doc.querySelector('embed'); // Could iterate looking for multiple attachments
+	if (pdfObject && pdfObject.src) { // Can't simply test for .src
+		item.attachments.push({
+			url: pdfObject.src,
+			title: "Full Text PDF",
+			mimeType: "application/pdf"
+		});
+		return;
+	}
+	
+	// the procedure above will probably find nothing, because PDFs seem to be
+	// embedded as static image previews with download links now
+	
+	let pdfLink = attr(doc, 'a[title="Download Full PDF"]', 'href');
+	
+	if (!pdfLink && doc.querySelector('#downloadsizemenu-side-bar')) {
+		for (let link of doc.querySelectorAll('#downloadsizemenu-side-bar a')) {
+			if (link.textContent.includes('All')) {
+				pdfLink = link.href;
+				break;
+			}
+		}
+	}
+	
+	if (!pdfLink && text(doc, '.field-format .field-value').includes('application/pdf')
+		&& doc.querySelector('a[aria-label="Download"]')) {
+		pdfLink = attr(doc, 'a[aria-label="Download"]', 'href');
+	}
+	
+	if (pdfLink) {
+		item.attachments.push({
+			url: pdfLink,
+			title: "Full Text PDF",
+			mimeType: "application/pdf"
+		});
+	}
+}
+
+function join(x, y) {
+	if (x == y || !x || !y) {
+		return x || y;
+	}
+	else {
+		return `${x} (${y})`;
+	}
+}
 
 /** BEGIN TEST CASES **/
 var testCases = [
 	{
 		"type": "web",
-		"url": "http://cdm15979.contentdm.oclc.org/cdm/compoundobject/collection/p15979coll3/id/2419",
+		"url": "https://cdm15979.contentdm.oclc.org/digital/collection/p15979coll3/id/2419",
 		"items": [
 			{
-				"itemType": "manuscript",
-				"title": "MS.15.1.2.000. Sir Robert Hart Diary: Volume 02: February 1855-July 1855",
+				"itemType": "document",
+				"title": "Sir Robert Hart Diary: Volume 02: February 1855-July 1855",
 				"creators": [
 					{
 						"firstName": "Robert",
 						"lastName": "Hart",
-						"creatorType": "creator"
+						"creatorType": "author"
 					},
 					{
 						"lastName": "Harvard University Asia Center",
@@ -465,22 +391,24 @@ var testCases = [
 					}
 				],
 				"date": "1855-07-29",
-				"abstractNote": "Front Cover, outer. Personal Diary of Sir Robert Hart (1835-1911). Transcription is reproduced by permission of the Harvard University Asia Center, edited Queen's University Belfast 2011.",
-				"archive": "MS 15/1; Sir Robert Hart Collection MS 15",
-				"archiveLocation": "MS 15/1/2/000. MS 15/1/2",
+				"abstractNote": "Personal Diary of Sir Robert Hart (1835-1911). Transcription is reproduced by permission of the Harvard University Asia Center, edited Queen's University Belfast 2011.",
+				"archive": "Hart Collection - Sir Robert Hart Diaries",
+				"archiveLocation": "MS 15/1/2",
 				"language": "eng",
-				"libraryCatalog": "Sir Robert Hart Collection: Diaries",
-				"rights": "Reproduction of these materials in any format for any purpose other than personal research and study may constitute a violation of CDPA 1988 and infringement of rights associated with the materials. Please contact us for permissions information at specialcollections@qub.ac.uk",
-				"shortTitle": "MS.15.1.2.000. Sir Robert Hart Diary",
-				"url": "http://cdm15979.contentdm.oclc.org/cdm/ref/collection/p15979coll3/id/2233",
+				"publisher": "Special Collections & Archives, Queen’s University Belfast",
+				"rights": "Reproduction of these materials in any format for any purpose other than personal research and study may constitute a violation of CDPA 1988 and infringement of rights associated with the materials.  Please contact us for permissions information at specialcollections@qub.ac.uk",
+				"shortTitle": "Sir Robert Hart Diary",
+				"url": "https://cdm15979.contentdm.oclc.org/digital/collection/p15979coll3/id/2419",
 				"attachments": [
 					{
-						"title": "Snapshot of CONTENTdm record",
+						"title": "Snapshot",
 						"mimeType": "text/html"
 					}
 				],
 				"tags": [
-					"China"
+					{
+						"tag": "China"
+					}
 				],
 				"notes": [],
 				"seeAlso": []
@@ -489,58 +417,75 @@ var testCases = [
 	},
 	{
 		"type": "web",
-		"url": "http://digital.ncdcr.gov/cdm/ref/collection/p16062coll24/id/9739",
+		"url": "https://digital.ncdcr.gov/digital/collection/p16062coll24/id/9739",
 		"items": [
 			{
 				"itemType": "document",
-				"title": "SR_GP_Correspondence_Turner_James_1805_Not. Dated_001. Governors' Papers: James Turner, Correspondence, 1805",
+				"title": "Governors' Papers: James Turner, Correspondence, 1805",
 				"creators": [
 					{
 						"firstName": "Thomas",
 						"lastName": "Brown",
-						"creatorType": "creator"
+						"creatorType": "author"
 					},
 					{
 						"firstName": "James",
 						"lastName": "Miller",
-						"creatorType": "creator"
+						"creatorType": "author"
 					},
 					{
 						"firstName": "John",
 						"lastName": "Reinhardt",
-						"creatorType": "creator"
+						"creatorType": "author"
 					},
 					{
 						"firstName": "James",
 						"lastName": "Rhodes",
-						"creatorType": "creator"
+						"creatorType": "author"
 					}
 				],
 				"date": "1805",
-				"abstractNote": "James Turner (1766-1824) was the twelfth governor of North Carolina. In 1802, John B. Ashe was elected to Governor but died before entering office. The legislative then elected Turner for three consecutive terms (1803-1805). He resigned his governorship in 1805 to join the United States Senate where he continued until bad health forced him out of politics in 1816.",
-				"archive": "Governors' Papers. James Turner. State Archives of North Carolina",
+				"abstractNote": "James Turner (1766-1824) was the twelfth governor of North Carolina. In 1802, John B. Ashe was elected to Governor but died before entering office. The legislative then elected Turner for three consecutive terms (1803-1805).  He resigned his governorship in 1805 to join the United States Senate where he continued until bad health forced him out of politics in 1816.",
+				"archive": "Governors Papers, Historical",
 				"archiveLocation": "G.P. 26-28, James Turner",
 				"language": "English",
-				"libraryCatalog": "Governors Papers, Historical",
 				"rights": "This item is provided courtesy of the State Archives of North Carolina and is a public record according to G.S.132.",
-				"shortTitle": "SR_GP_Correspondence_Turner_James_1805_Not. Dated_001. Governors' Papers",
-				"url": "http://digital.ncdcr.gov/cdm/ref/collection/p16062coll24/id/9728",
+				"shortTitle": "Governors' Papers",
+				"url": "https://digital.ncdcr.gov/digital/collection/p16062coll24/id/9739",
 				"attachments": [
 					{
-						"title": "Snapshot of CONTENTdm record",
+						"title": "Snapshot",
 						"mimeType": "text/html"
 					}
 				],
 				"tags": [
-					"Governors--North Carolina",
-					"Governors--North Carolina--Correspondence",
-					"North Carolina--History",
-					"North Carolina--History--1775-1865",
-					"North Carolina--Politics and government",
-					"North Carolina--Politics and government--1775-1865",
-					"Turner, James, 1766-1824",
-					"Turner, James, 1766-1824--Correspondence",
-					"United States--Politics and government"
+					{
+						"tag": "Governors--North Carolina"
+					},
+					{
+						"tag": "Governors--North Carolina--Correspondence"
+					},
+					{
+						"tag": "North Carolina--History"
+					},
+					{
+						"tag": "North Carolina--History--1775-1865"
+					},
+					{
+						"tag": "North Carolina--Politics and government"
+					},
+					{
+						"tag": "North Carolina--Politics and government--1775-1865"
+					},
+					{
+						"tag": "Turner, James, 1766-1824"
+					},
+					{
+						"tag": "Turner, James, 1766-1824--Correspondence"
+					},
+					{
+						"tag": "United States--Politics and government"
+					}
 				],
 				"notes": [],
 				"seeAlso": []
@@ -549,24 +494,224 @@ var testCases = [
 	},
 	{
 		"type": "web",
-		"url": "http://digitalcollections.missouristate.edu/cdm4/item_viewer.php?CISOROOT=%2FFruitful&CISOPTR=295&DMSCALE=25&DMWIDTH=600&DMHEIGHT=600&DMMODE=viewer&DMFULL=0&DMX=189&DMY=77&DMTEXT=&DMTHUMB=1&REC=1&DMROTATE=0&x=415&y=166",
+		"url": "https://digitalcollections.missouristate.edu/digital/collection/Fruitful/id/295",
 		"items": [
 			{
-				"itemType": "document",
+				"itemType": "artwork",
 				"title": "Peaches sprayed for curculio. Self boiled lime sulfur. Curculio free-392. Curculio-11. Dunn Orchard, Koshkonong",
 				"creators": [],
-				"date": "1911, August 1",
-				"libraryCatalog": "Digital Collections : Item Viewer",
-				"url": "http://digitalcollections.missouristate.edu/cdm4/item_viewer.php?CISOROOT=%2FFruitful&CISOPTR=295&DMSCALE=25&DMWIDTH=600&DMHEIGHT=600&DMMODE=viewer&DMFULL=0&DMX=189&DMY=77&DMTEXT=&DMTHUMB=1&REC=1&DMROTATE=0&x=415&y=166",
+				"date": "1911-08-01",
+				"abstractNote": "Peach",
+				"archive": "A Fruitful Heritage",
+				"archiveLocation": "183",
+				"artworkMedium": "image",
+				"url": "https://digitalcollections.missouristate.edu/digital/collection/Fruitful/id/295",
 				"attachments": [
 					{
-						"title": "Snapshot of CONTENTdm record",
+						"title": "Snapshot",
 						"mimeType": "text/html"
 					}
 				],
 				"tags": [
-					"Spraying & Dusting Experiments",
-					"curculio, lime sulfur, sprayed"
+					{
+						"tag": "curculio, lime sulfur, sprayed"
+					}
+				],
+				"notes": [],
+				"seeAlso": []
+			}
+		]
+	},
+	{
+		"type": "web",
+		"url": "https://hrc.contentdm.oclc.org/digital/collection/p15878coll15/id/797/rec/58",
+		"items": [
+			{
+				"itemType": "document",
+				"title": "Handwritten letter from Norman O. Dawn to Raymond Fielding, undated",
+				"creators": [
+					{
+						"firstName": "Norman O.",
+						"lastName": "Dawn",
+						"creatorType": "author"
+					}
+				],
+				"archive": "Norman O. Dawn Collection",
+				"archiveLocation": "Box 36, Folder 7",
+				"language": "English",
+				"rights": "http://rightsstatements.org/vocab/InC/1.0/",
+				"url": "https://hrc.contentdm.oclc.org/digital/collection/p15878coll15/id/797/rec/58",
+				"attachments": [
+					{
+						"title": "Snapshot",
+						"mimeType": "text/html"
+					}
+				],
+				"tags": [],
+				"notes": [],
+				"seeAlso": []
+			}
+		]
+	},
+	{
+		"type": "web",
+		"url": "https://contentdm.carleton.edu/digital/collection/NfldLibrary/id/4277/rec/2",
+		"items": [
+			{
+				"itemType": "document",
+				"title": "The Orange and Black 1916",
+				"creators": [
+					{
+						"lastName": "1916 Senior Class of Northfield High School",
+						"creatorType": "author",
+						"fieldMode": 1
+					}
+				],
+				"date": "1916-05",
+				"abstractNote": "The 1916 Orange and Black Yearbook from Northfield High School.  Includes photographs of students and faculty. Sections devoted to the various classes, student activities and clubs include athletics, music, student essays and poems.  An alumni section lists the occupations of graduates from the classes of 1907 to 1915.  Also features advertisements for local businesses.",
+				"archive": "N-RCDHC - Northfield Public Library",
+				"archiveLocation": "PYE 372.97765 Or 1916",
+				"language": "eng",
+				"rights": "Use of this object is governed by U.S. and international copyright law. Contact the Northfield Public Library for permission to use this object.",
+				"url": "https://contentdm.carleton.edu/digital/collection/NfldLibrary/id/4277/rec/2",
+				"attachments": [
+					{
+						"title": "Snapshot",
+						"mimeType": "text/html"
+					}
+				],
+				"tags": [
+					{
+						"tag": "Category 8 - Documentary Artifact-Book"
+					}
+				],
+				"notes": [],
+				"seeAlso": []
+			}
+		]
+	},
+	{
+		"type": "web",
+		"url": "https://digital.cincinnatilibrary.org/digital/collection/p16998coll27/id/2136/rec/10",
+		"items": [
+			{
+				"itemType": "interview",
+				"title": "Interview (William Thomas Ariss)",
+				"creators": [
+					{
+						"firstName": "James",
+						"lastName": "Grever",
+						"creatorType": "interviewer"
+					}
+				],
+				"date": "1936-05-24",
+				"archive": "Veterans History Project",
+				"url": "https://digital.cincinnatilibrary.org/digital/collection/p16998coll27/id/2136/rec/10",
+				"attachments": [
+					{
+						"title": "Snapshot",
+						"mimeType": "text/html"
+					}
+				],
+				"tags": [
+					{
+						"tag": "Ariss, William Thomas"
+					}
+				],
+				"notes": [],
+				"seeAlso": []
+			}
+		]
+	},
+	{
+		"type": "web",
+		"url": "http://digital.library.stonybrook.edu/cdm/search/searchterm/cookbook/order/nosort",
+		"items": "multiple"
+	},
+	{
+		"type": "web",
+		"url": "http://digital.library.stonybrook.edu/cdm/compoundobject/collection/amar/id/63405/rec/2",
+		"items": [
+			{
+				"itemType": "document",
+				"title": "A Central Asian village at the dawn of civilization, excavations at Anau, Turkmenistan (Page 1)",
+				"creators": [
+					{
+						"firstName": "Fredrik T.",
+						"lastName": "Hiebert",
+						"creatorType": "author"
+					},
+					{
+						"firstName": "K.",
+						"lastName": "Kurbansakhatov",
+						"creatorType": "contributor"
+					}
+				],
+				"archive": "AMAR Archive of Mesopotamian Archaeological Reports",
+				"language": "eng",
+				"publisher": "Philadelphia : University of Pennsylvania Museum of Archaeology and Anthropology, c2003.",
+				"rights": "May not be reused for commercial purposes.",
+				"url": "http://digital.library.stonybrook.edu/cdm/compoundobject/collection/amar/id/63405/rec/2",
+				"attachments": [
+					{
+						"title": "Snapshot",
+						"mimeType": "text/html"
+					},
+					{
+						"title": "Full Text PDF",
+						"mimeType": "application/pdf"
+					}
+				],
+				"tags": [],
+				"notes": [],
+				"seeAlso": []
+			}
+		]
+	},
+	{
+		"type": "web",
+		"url": "https://content.scu.edu/digital/collection/rms/id/60",
+		"defer": true,
+		"items": [
+			{
+				"itemType": "document",
+				"title": "Curing our tunnel vision: the representation of the Ohlone in Bay Area museums",
+				"creators": [
+					{
+						"firstName": "Amy C.",
+						"lastName": "Raimundo",
+						"creatorType": "author"
+					},
+					{
+						"firstName": "Russell K.",
+						"lastName": "Skowronek",
+						"creatorType": "seriesEditor"
+					}
+				],
+				"date": "1995",
+				"archive": "Anthropology Research Manuscripts",
+				"language": "English",
+				"publisher": "Santa Clara University, Department of Anthropology and Sociology",
+				"rights": "Permission to copy or publish any portion of SCU Archives materials must be given by Santa Clara University Library, Archives & Special Collections.",
+				"shortTitle": "Curing our tunnel vision",
+				"url": "https://content.scu.edu/digital/collection/rms/id/60",
+				"attachments": [
+					{
+						"title": "Snapshot",
+						"mimeType": "text/html"
+					},
+					{
+						"title": "Full Text PDF",
+						"mimeType": "application/pdf"
+					}
+				],
+				"tags": [
+					{
+						"tag": "Costanoan Indians"
+					},
+					{
+						"tag": "Museums--California--San Francisco Bay Area"
+					}
 				],
 				"notes": [],
 				"seeAlso": []
